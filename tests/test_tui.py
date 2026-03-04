@@ -2,10 +2,16 @@
 
 import pytest
 from rich.table import Table
+from rich.panel import Panel
 from interchange_squeeze.tui import (
     build_value_table,
     build_scenario_table,
     build_sensitivity_table,
+    build_recommendation_panel,
+    build_churn_sensitivity_table,
+    build_segment_value_table,
+    build_competitive_dynamics_panel,
+    build_implementation_table,
 )
 from interchange_squeeze.scenarios import DEFAULT_SCENARIOS, S3_TIERED
 
@@ -92,3 +98,83 @@ class TestBuildSensitivityTable:
     def test_custom_base_revenue(self):
         table = build_sensitivity_table(base_revenue=5_000_000)
         assert isinstance(table, Table)
+
+
+class TestBuildRecommendationPanel:
+    def test_returns_panel(self):
+        panel = build_recommendation_panel()
+        assert isinstance(panel, Panel)
+
+    def test_has_title(self):
+        panel = build_recommendation_panel()
+        assert panel.title is not None
+
+
+class TestBuildChurnSensitivityTable:
+    def test_returns_rich_table(self):
+        table = build_churn_sensitivity_table()
+        assert isinstance(table, Table)
+
+    def test_row_count(self):
+        table = build_churn_sensitivity_table()
+        assert table.row_count == 10
+
+    def test_has_retention_rate_column(self):
+        table = build_churn_sensitivity_table()
+        col_names = [col.header for col in table.columns]
+        assert "Retention Rate" in col_names
+
+    def test_has_breakeven_column(self):
+        table = build_churn_sensitivity_table()
+        col_names = [col.header for col in table.columns]
+        assert "Break-even?" in col_names
+
+
+class TestBuildSegmentValueTable:
+    def test_returns_rich_table(self):
+        table = build_segment_value_table()
+        assert isinstance(table, Table)
+
+    def test_row_count(self):
+        table = build_segment_value_table()
+        assert table.row_count == 3
+
+    def test_has_segment_column(self):
+        table = build_segment_value_table()
+        col_names = [col.header for col in table.columns]
+        assert "Segment" in col_names
+
+    def test_has_roi_column(self):
+        table = build_segment_value_table()
+        col_names = [col.header for col in table.columns]
+        assert "ROI Multiple" in col_names
+
+
+class TestBuildCompetitiveDynamicsPanel:
+    def test_returns_panel(self):
+        panel = build_competitive_dynamics_panel()
+        assert isinstance(panel, Panel)
+
+    def test_has_title(self):
+        panel = build_competitive_dynamics_panel()
+        assert panel.title is not None
+
+
+class TestBuildImplementationTable:
+    def test_returns_rich_table(self):
+        table = build_implementation_table()
+        assert isinstance(table, Table)
+
+    def test_row_count(self):
+        table = build_implementation_table()
+        assert table.row_count == 4
+
+    def test_has_phase_column(self):
+        table = build_implementation_table()
+        col_names = [col.header for col in table.columns]
+        assert "Phase" in col_names
+
+    def test_has_success_metric_column(self):
+        table = build_implementation_table()
+        col_names = [col.header for col in table.columns]
+        assert "Success Metric" in col_names

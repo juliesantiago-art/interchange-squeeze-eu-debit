@@ -5,7 +5,7 @@ in the European debit interchange squeeze.
 """
 
 from dataclasses import dataclass, field
-from interchange_squeeze.models import calc_revenue, calc_gross_profit, calc_gross_margin
+from interchange_squeeze.models import calc_revenue, calc_gross_profit, calc_gross_margin, bp_to_rate
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,9 @@ class Scenario:
             <1.0 means some enterprise merchants churn due to high price.
         gmv_growth_rate: Fractional GMV growth applied to all segments
             (e.g. 0.05 = 5% growth above baseline). Used in S4.
+        recommended: True if this is the recommended scenario
+        includes_growth_assumption: True if the scenario bakes in a GMV growth target
+            (commercial execution assumption, not a pricing input)
     """
     name: str
     description: str
@@ -47,6 +50,8 @@ class Scenario:
     credit_alt_rate_bp: float       # SMB / alt rate
     enterprise_retention: float = 1.0
     gmv_growth_rate: float = 0.0
+    recommended: bool = False
+    includes_growth_assumption: bool = False
 
 
 @dataclass
@@ -193,16 +198,122 @@ S3_TIERED = Scenario(
     residual_debit_rate_bp=15.0,
     credit_alt_rate_bp=18.0,
     enterprise_retention=1.0,
+    recommended=True,
 )
 
 S4_TIERED_GROWTH = Scenario(
     name="S4 Tiered + Growth",
-    description="Tiered pricing with 8% GMV growth from improved approval rates and new merchant wins.",
+    description="Tiered pricing with 8% GMV growth from improved approval rates and new merchant wins. ⚠ Growth assumption is a commercial execution target, not a pricing input",
     at_risk_rate_bp=12.0,
     residual_debit_rate_bp=15.0,
     credit_alt_rate_bp=18.0,
     enterprise_retention=1.0,
     gmv_growth_rate=0.08,
+    includes_growth_assumption=True,
 )
 
 DEFAULT_SCENARIOS: list[Scenario] = [S1_HOLD, S2_FLAT_10BP, S3_TIERED, S4_TIERED_GROWTH]
+
+RECOMMENDED_SCENARIO = S3_TIERED
+
+
+# ---------------------------------------------------------------------------
+# Seasonality & monthly P&L
+# ---------------------------------------------------------------------------
+
+# EU debit: Q1 light, Q4 heavy (sums to 1.0)
+MONTHLY_SEASONALITY: list[float] = [
+    0.070, 0.075, 0.075, 0.080, 0.082, 0.082,
+    0.082, 0.082, 0.082, 0.095, 0.100, 0.095,
+]
+
+
+def calc_monthly_pl(
+    scenario: Scenario,
+    enterprise_gmv: float = PORTFOLIO_ENTERPRISE_GMV,
+    mid_gmv: float = PORTFOLIO_MID_GMV,
+    smb_gmv: float = PORTFOLIO_SMB_GMV,
+    cost_bp: float = DEFAULT_COST_BP,
+) -> list[dict]:
+    """Return 12 monthly P&L rows for the given scenario with EU debit seasonality.
+
+    Each dict: {month, gmv, revenue, gross_profit, gross_margin_pct}
+    Applies MONTHLY_SEASONALITY weights to annual P&L totals.
+    """
+    annual = run_scenario(scenario, enterprise_gmv, mid_gmv, smb_gmv, cost_bp)
+    rows = []
+    for i, weight in enumerate(MONTHLY_SEASONALITY):
+        month_gmv = annual.total_gmv * weight
+        month_rev = annual.total_revenue * weight
+        month_gp = annual.total_gross_profit * weight
+        gm_pct = month_gp / month_rev if month_rev > 0 else 0.0
+        rows.append({
+            "month": i + 1,
+            "gmv": month_gmv,
+            "revenue": month_rev,
+            "gross_profit": month_gp,
+            "gross_margin_pct": gm_pct,
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Break-even analysis
+# ---------------------------------------------------------------------------
+
+def calc_breakeven_attrition(
+    test_scenario: Scenario,
+    vs_scenario: Scenario,
+    representative_merchant_gmv: float = 40_000_000,  # €40M monthly = €480M annual
+    enterprise_gmv: float = PORTFOLIO_ENTERPRISE_GMV,
+    mid_gmv: float = PORTFOLIO_MID_GMV,
+    smb_gmv: float = PORTFOLIO_SMB_GMV,
+    cost_bp: float = DEFAULT_COST_BP,
+) -> dict:
+    """Calculate max Enterprise attrition before test_scenario GP falls below vs_scenario GP.
+
+    Args:
+        test_scenario: The scenario being stress-tested (e.g. S3_TIERED)
+        vs_scenario: The floor scenario to defend against (e.g. S2_FLAT_10BP)
+        representative_merchant_gmv: Monthly GMV of a representative merchant (EUR)
+        enterprise_gmv: Annual enterprise portfolio GMV (EUR)
+        mid_gmv: Annual mid-market portfolio GMV (EUR)
+        smb_gmv: Annual SMB portfolio GMV (EUR)
+        cost_bp: Cost to serve in basis points
+
+    Returns:
+        {
+            "breakeven_churn_pct": float,    # % Enterprise GMV that can churn
+            "breakeven_gmv_eur": float,      # EUR annual GMV that can leave
+            "merchants_equiv": int,          # Equivalent number of representative merchants
+            "test_gp": float,                # Annual GP of test scenario
+            "vs_gp": float,                  # Annual GP of vs scenario (floor)
+            "gp_cushion": float,             # GP advantage test has over vs
+        }
+    """
+    test_result = run_scenario(test_scenario, enterprise_gmv, mid_gmv, smb_gmv, cost_bp)
+    vs_result = run_scenario(vs_scenario, enterprise_gmv, mid_gmv, smb_gmv, cost_bp)
+
+    test_gp = test_result.total_gross_profit
+    vs_gp = vs_result.total_gross_profit
+    gp_cushion = test_gp - vs_gp
+
+    # Each unit of enterprise GMV at test_scenario rate contributes (rate - cost) margin
+    enterprise_margin_rate = bp_to_rate(test_scenario.at_risk_rate_bp - cost_bp)
+    if enterprise_margin_rate <= 0:
+        breakeven_gmv = 0.0
+    else:
+        breakeven_gmv = gp_cushion / enterprise_margin_rate
+
+    breakeven_churn_pct = (breakeven_gmv / enterprise_gmv) * 100.0 if enterprise_gmv > 0 else 0.0
+    representative_annual_gmv = representative_merchant_gmv * 12
+    merchants_equiv = int(breakeven_gmv / representative_annual_gmv) if representative_annual_gmv > 0 else 0
+
+    return {
+        "breakeven_churn_pct": breakeven_churn_pct,
+        "breakeven_gmv_eur": breakeven_gmv,
+        "merchants_equiv": merchants_equiv,
+        "test_gp": test_gp,
+        "vs_gp": vs_gp,
+        "gp_cushion": gp_cushion,
+    }

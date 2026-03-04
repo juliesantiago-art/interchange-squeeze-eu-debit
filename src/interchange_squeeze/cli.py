@@ -65,11 +65,45 @@ def run(
     monthly_gmv = merchant_gmv * 1_000_000
 
     if non_interactive:
-        from interchange_squeeze.tui import build_value_table, build_scenario_table, build_sensitivity_table
+        from rich.columns import Columns
+        from interchange_squeeze.tui import (
+            build_value_table,
+            build_scenario_table,
+            build_sensitivity_table,
+            build_breakeven_table,
+            build_chargeback_table,
+            build_recovery_table,
+            build_monthly_pl_table,
+            build_recommendation_panel,
+            build_churn_sensitivity_table,
+            build_segment_value_table,
+            build_competitive_dynamics_panel,
+            build_implementation_table,
+        )
+        from interchange_squeeze.scenarios import RECOMMENDED_SCENARIO
         console.print(build_value_table(monthly_gmv, yuno_rate, competitor_rate, yuno_bp, competitor_bp))
         console.print()
         console.print(build_scenario_table())
         console.print()
         console.print(build_sensitivity_table())
+        console.print()
+        console.print(build_breakeven_table())
+        console.print()
+        console.print(Columns([
+            build_chargeback_table(monthly_gmv),
+            build_recovery_table(monthly_gmv),
+        ]))
+        console.print()
+        console.print(build_monthly_pl_table(RECOMMENDED_SCENARIO))
+        console.print()
+        console.print(build_recommendation_panel())
+        console.print()
+        console.print(build_churn_sensitivity_table())
+        console.print()
+        console.print(build_segment_value_table())
+        console.print()
+        console.print(build_competitive_dynamics_panel())
+        console.print()
+        console.print(build_implementation_table())
     else:
         run_interactive(console, monthly_gmv, yuno_rate, competitor_rate, yuno_bp, competitor_bp)

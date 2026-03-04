@@ -3,6 +3,8 @@
 import pytest
 from interchange_squeeze.value import (
     ApprovalRateAnalysis,
+    ChargebackAnalysis,
+    FailedPaymentRecovery,
     DEFAULT_YUNO_APPROVAL_RATE,
     DEFAULT_COMPETITOR_APPROVAL_RATE,
     DEFAULT_AVG_ORDER_VALUE_EUR,
@@ -81,10 +83,13 @@ class TestPricingPremiumCost:
 
 
 class TestROIMultiple:
-    def test_merchant_a_roi_approx_46x(self, merchant_a):
-        # ~46x ROI: €1.48M revenue / €32k premium ≈ 46.25
+    def test_merchant_a_roi_approx_16x(self, merchant_a):
+        # ~16x ROI (net profit basis): incremental GP / premium
+        # GP ≈ €1.48M × 35% ≈ €518k; premium = €32k; ROI ≈ 16.19x
         result = merchant_a.calc_roi_multiple()
-        assert result == pytest.approx(46.25, rel=0.01)
+        expected = merchant_a.calc_incremental_gross_profit() / merchant_a.calc_pricing_premium_cost()
+        assert result == pytest.approx(expected, rel=1e-6)
+        assert result == pytest.approx(16.19, rel=0.01)
 
     def test_zero_premium_returns_zero(self):
         a = ApprovalRateAnalysis(40_000_000, yuno_bp=10.0, competitor_bp=10.0)
@@ -93,6 +98,75 @@ class TestROIMultiple:
     def test_roi_greater_than_one(self, merchant_a):
         # The value proposition must be significantly positive
         assert merchant_a.calc_roi_multiple() > 10.0
+
+
+class TestChargebackAnalysis:
+    @pytest.fixture
+    def cb(self):
+        return ChargebackAnalysis(monthly_gmv=40_000_000)
+
+    def test_monthly_chargebacks(self, cb):
+        # 40M / 85 * 0.5% ≈ 2352.9
+        transactions = 40_000_000 / 85
+        expected = transactions * 0.5 / 100
+        assert cb.calc_monthly_chargebacks() == pytest.approx(expected, rel=1e-6)
+
+    def test_chargebacks_avoided(self, cb):
+        # 40M / 85 * 0.1% ≈ 470.6
+        transactions = 40_000_000 / 85
+        expected = transactions * 0.1 / 100
+        assert cb.calc_chargebacks_avoided() == pytest.approx(expected, rel=1e-6)
+
+    def test_fee_savings(self, cb):
+        # chargebacks_avoided × €20
+        expected = cb.calc_chargebacks_avoided() * 20.0
+        assert cb.calc_fee_savings() == pytest.approx(expected, rel=1e-6)
+
+    def test_dispute_cost_savings(self, cb):
+        # chargebacks_avoided × €15
+        expected = cb.calc_chargebacks_avoided() * 15.0
+        assert cb.calc_dispute_cost_savings() == pytest.approx(expected, rel=1e-6)
+
+    def test_total_monthly_savings(self, cb):
+        expected = cb.calc_fee_savings() + cb.calc_dispute_cost_savings()
+        assert cb.calc_total_monthly_savings() == pytest.approx(expected, rel=1e-6)
+
+    def test_total_savings_positive(self, cb):
+        assert cb.calc_total_monthly_savings() > 0
+
+    def test_zero_reduction_means_no_savings(self):
+        cb = ChargebackAnalysis(monthly_gmv=40_000_000, expected_reduction_pct=0.0)
+        assert cb.calc_fee_savings() == 0.0
+        assert cb.calc_total_monthly_savings() == 0.0
+
+
+class TestFailedPaymentRecovery:
+    @pytest.fixture
+    def fpr(self):
+        return FailedPaymentRecovery(monthly_gmv=40_000_000)
+
+    def test_failed_transactions(self, fpr):
+        # 40M / 85 * 3% ≈ 14117.6
+        transactions = 40_000_000 / 85
+        expected = transactions * 3.0 / 100
+        assert fpr.calc_failed_transactions() == pytest.approx(expected, rel=1e-6)
+
+    def test_recovered_transactions(self, fpr):
+        # failed × 25%
+        expected = fpr.calc_failed_transactions() * 0.25
+        assert fpr.calc_recovered_transactions() == pytest.approx(expected, rel=1e-6)
+
+    def test_recovered_revenue(self, fpr):
+        expected = fpr.calc_recovered_transactions() * 85.0
+        assert fpr.calc_recovered_revenue() == pytest.approx(expected, rel=1e-6)
+
+    def test_recovered_revenue_positive(self, fpr):
+        assert fpr.calc_recovered_revenue() > 0
+
+    def test_zero_recovery_rate(self):
+        fpr = FailedPaymentRecovery(monthly_gmv=40_000_000, retry_recovery_rate_pct=0.0)
+        assert fpr.calc_recovered_transactions() == 0.0
+        assert fpr.calc_recovered_revenue() == 0.0
 
 
 class TestNetValue:

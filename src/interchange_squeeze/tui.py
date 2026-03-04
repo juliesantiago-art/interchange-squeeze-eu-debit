@@ -1,9 +1,12 @@
 """Rich TUI dashboard for the Interchange Squeeze tool.
 
-Provides three panels:
+Provides panels:
 1. Merchant Value Analysis — approval rate delta → incremental revenue + ROI
 2. Scenario Comparison — S1–S4 side-by-side P&L
 3. Sensitivity Analysis — GMV growth needed at each rate to match baseline revenue
+4. Break-Even Analysis — max Enterprise churn before S3 loses to S2
+5. Chargeback & Failed Payment Recovery — additional value levers
+6. Monthly P&L — 12-month seasonality breakdown for recommended scenario
 """
 
 from __future__ import annotations
@@ -18,18 +21,30 @@ from rich.layout import Layout
 from rich.prompt import Prompt
 from rich import box
 
-from interchange_squeeze.value import ApprovalRateAnalysis
+from interchange_squeeze.value import ApprovalRateAnalysis, ChargebackAnalysis, FailedPaymentRecovery
+from dataclasses import replace as _replace
+from interchange_squeeze.models import DEFAULT_SEGMENTS
 from interchange_squeeze.scenarios import (
     DEFAULT_SCENARIOS,
     run_scenario,
     compare_scenarios,
+    calc_breakeven_attrition,
+    calc_monthly_pl,
     ScenarioResult,
     Scenario,
     PORTFOLIO_ENTERPRISE_GMV,
     PORTFOLIO_MID_GMV,
     PORTFOLIO_SMB_GMV,
+    S1_HOLD,
+    S2_FLAT_10BP,
+    S3_TIERED,
+    S4_TIERED_GROWTH,
+    RECOMMENDED_SCENARIO,
 )
 from interchange_squeeze.scenarios import DEFAULT_COST_BP as _DEFAULT_COST_BP
+
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
 def fmt_eur(amount: float, unit: str = "M") -> str:
@@ -63,6 +78,7 @@ def build_value_table(
     competitor_rate: float = 88.6,
     yuno_bp: float = 18.0,
     competitor_bp: float = 10.0,
+    merchant_margin: float = 0.35,
 ) -> Table:
     """Build the Merchant Value Analysis table.
 
@@ -75,6 +91,7 @@ def build_value_table(
         competitor_approval_rate=competitor_rate,
         yuno_bp=yuno_bp,
         competitor_bp=competitor_bp,
+        merchant_gross_margin=merchant_margin,
     )
 
     table = Table(
@@ -114,7 +131,7 @@ def build_value_table(
         f"[yellow]+{fmt_eur(premium, 'K')}/mo[/yellow]",
         "Extra cost vs competitor",
     )
-    table.add_row("Incremental Gross Profit", f"[green]+{fmt_eur(inc_gp, 'K')}/mo[/green]", f"@ {fmt_pct(analysis.merchant_gross_margin)} GM")
+    table.add_row("Incremental Gross Profit", f"[green]+{fmt_eur(inc_gp, 'K')}/mo[/green]", f"@ {fmt_pct(merchant_margin)} GM")
     table.add_section()
     net_color = "green" if net > 0 else "red"
     table.add_row(
@@ -126,7 +143,7 @@ def build_value_table(
     table.add_row(
         "ROI Multiple",
         f"[bold {roi_color}]{roi:.1f}x[/bold {roi_color}]",
-        "Rev per €1 premium",
+        "GP per €1 premium",
     )
 
     return table
@@ -142,6 +159,7 @@ def build_scenario_table(
     if scenarios is None:
         scenarios = DEFAULT_SCENARIOS
 
+    scenario_by_name = {s.name: s for s in scenarios}
     results = compare_scenarios(scenarios, enterprise_gmv, mid_gmv, smb_gmv)
 
     table = Table(
@@ -151,15 +169,25 @@ def build_scenario_table(
         header_style="bold white",
         border_style="cyan",
         min_width=90,
+        caption="[dim]★ = Recommended scenario  |  S4 growth assumption is a commercial execution target, not a pricing input[/dim]",
     )
     table.add_column("Metric", style="dim white", min_width=24)
 
     for result in results:
-        # Highlight the best scenario (highest revenue)
-        if result == results[0]:
-            table.add_column(f"[bold green]{result.scenario_name}[/bold green]", justify="right", min_width=18)
+        scenario = scenario_by_name.get(result.scenario_name)
+        is_recommended = scenario is not None and scenario.recommended
+        is_growth = scenario is not None and scenario.includes_growth_assumption
+
+        if is_recommended:
+            col_label = f"[bold green]{result.scenario_name} ★[/bold green]"
+        elif is_growth:
+            col_label = f"[yellow]{result.scenario_name} ⚠[/yellow]"
+        elif result == results[0]:
+            col_label = f"[bold green]{result.scenario_name}[/bold green]"
         else:
-            table.add_column(result.scenario_name, justify="right", min_width=18)
+            col_label = result.scenario_name
+
+        table.add_column(col_label, justify="right", min_width=18)
 
     def row(label: str, values: list[str]) -> None:
         table.add_row(label, *values)
@@ -206,8 +234,6 @@ def build_sensitivity_table(
     Shows how much GMV growth is needed at various rates to match the
     baseline revenue (S3 Tiered at default GMV).
     """
-    from interchange_squeeze.scenarios import S3_TIERED, run_scenario, Scenario
-
     if base_revenue is None:
         base_result = run_scenario(S3_TIERED, enterprise_gmv, mid_gmv, smb_gmv)
         base_revenue = base_result.total_revenue
@@ -261,6 +287,342 @@ def build_sensitivity_table(
     return table
 
 
+def build_breakeven_table(
+    test_scenario: Scenario = S3_TIERED,
+    vs_scenario: Scenario = S2_FLAT_10BP,
+    enterprise_gmv: float = PORTFOLIO_ENTERPRISE_GMV,
+    mid_gmv: float = PORTFOLIO_MID_GMV,
+    smb_gmv: float = PORTFOLIO_SMB_GMV,
+) -> Table:
+    """Break-Even Analysis: how much Enterprise churn before test_scenario GP falls below vs_scenario GP.
+
+    Columns: Comparison | GP Cushion | Max Churn % | GMV at Risk | Merchants Lost | Decision
+    """
+    result = calc_breakeven_attrition(
+        test_scenario=test_scenario,
+        vs_scenario=vs_scenario,
+        enterprise_gmv=enterprise_gmv,
+        mid_gmv=mid_gmv,
+        smb_gmv=smb_gmv,
+    )
+
+    table = Table(
+        title="[bold cyan]Break-Even Analysis — Enterprise Attrition Tolerance[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=90,
+    )
+    table.add_column("Comparison", style="dim white", min_width=22)
+    table.add_column("GP Cushion", justify="right", min_width=14)
+    table.add_column("Max Churn %", justify="right", min_width=12)
+    table.add_column("GMV at Risk", justify="right", min_width=14)
+    table.add_column("Merchants Lost", justify="right", min_width=15)
+    table.add_column("Decision", style="dim", min_width=22)
+
+    churn_pct = result["breakeven_churn_pct"]
+    churn_color = "green" if churn_pct >= 50 else "yellow" if churn_pct >= 25 else "red"
+
+    table.add_row(
+        f"{test_scenario.name} vs {vs_scenario.name}",
+        fmt_eur(result["gp_cushion"], "M"),
+        f"[bold {churn_color}]{churn_pct:.1f}%[/bold {churn_color}]",
+        fmt_eur(result["breakeven_gmv_eur"], "M"),
+        f"~{result['merchants_equiv']} merchants",
+        f"{test_scenario.name} survives up to {churn_pct:.0f}% Enterprise churn",
+    )
+    table.add_section()
+    table.add_row(
+        "Test scenario GP",
+        fmt_eur(result["test_gp"], "M"),
+        "", "", "",
+        f"vs. floor GP {fmt_eur(result['vs_gp'], 'M')}",
+    )
+
+    return table
+
+
+def build_chargeback_table(
+    monthly_gmv: float = 40_000_000,
+    chargeback_rate: float = 0.5,
+    expected_reduction: float = 0.1,
+) -> Table:
+    """Chargeback reduction value: fee savings + operational cost savings."""
+    analysis = ChargebackAnalysis(
+        monthly_gmv=monthly_gmv,
+        chargeback_rate_pct=chargeback_rate,
+        expected_reduction_pct=expected_reduction,
+    )
+
+    table = Table(
+        title="[bold cyan]Chargeback Reduction Value[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=55,
+    )
+    table.add_column("Metric", style="dim white", min_width=28)
+    table.add_column("Value", justify="right", style="bold green", min_width=14)
+
+    table.add_row("Monthly Chargebacks", f"{analysis.calc_monthly_chargebacks():,.0f}")
+    table.add_row("Chargebacks Avoided", f"[green]+{analysis.calc_chargebacks_avoided():,.0f}[/green]")
+    table.add_section()
+    table.add_row("Acquirer Fee Savings", fmt_eur(analysis.calc_fee_savings(), "K") + "/mo")
+    table.add_row("Dispute Cost Savings", fmt_eur(analysis.calc_dispute_cost_savings(), "K") + "/mo")
+    table.add_row(
+        "[bold]Total Monthly Savings[/bold]",
+        f"[bold green]{fmt_eur(analysis.calc_total_monthly_savings(), 'K')}/mo[/bold green]",
+    )
+
+    return table
+
+
+def build_recovery_table(
+    monthly_gmv: float = 40_000_000,
+    failed_rate: float = 3.0,
+    retry_recovery: float = 25.0,
+) -> Table:
+    """Failed payment recovery value: revenue recovered via retry logic."""
+    analysis = FailedPaymentRecovery(
+        monthly_gmv=monthly_gmv,
+        failed_payment_rate_pct=failed_rate,
+        retry_recovery_rate_pct=retry_recovery,
+    )
+
+    table = Table(
+        title="[bold cyan]Failed Payment Recovery[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=55,
+    )
+    table.add_column("Metric", style="dim white", min_width=28)
+    table.add_column("Value", justify="right", style="bold green", min_width=14)
+
+    table.add_row("Failed Transactions/mo", f"{analysis.calc_failed_transactions():,.0f}")
+    table.add_row("Recovered Transactions/mo", f"[green]+{analysis.calc_recovered_transactions():,.0f}[/green]")
+    table.add_section()
+    table.add_row(
+        "[bold]Recovered Revenue/mo[/bold]",
+        f"[bold green]{fmt_eur(analysis.calc_recovered_revenue(), 'K')}/mo[/bold green]",
+    )
+
+    return table
+
+
+def build_monthly_pl_table(
+    scenario: Scenario = S3_TIERED,
+    enterprise_gmv: float = PORTFOLIO_ENTERPRISE_GMV,
+    mid_gmv: float = PORTFOLIO_MID_GMV,
+    smb_gmv: float = PORTFOLIO_SMB_GMV,
+) -> Table:
+    """12-month P&L for the given scenario with EU debit seasonality.
+
+    Columns: Month | GMV | Revenue | Gross Profit | GM%
+    """
+    rows = calc_monthly_pl(scenario, enterprise_gmv, mid_gmv, smb_gmv)
+
+    table = Table(
+        title=f"[bold cyan]12-Month P&L — {scenario.name} (with EU Debit Seasonality)[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=72,
+    )
+    table.add_column("Month", style="dim white", min_width=6)
+    table.add_column("GMV", justify="right", min_width=14)
+    table.add_column("Revenue", justify="right", min_width=14)
+    table.add_column("Gross Profit", justify="right", min_width=14)
+    table.add_column("GM%", justify="right", min_width=8)
+
+    for row in rows:
+        month_name = MONTHS[row["month"] - 1]
+        gm_pct = row["gross_margin_pct"] * 100
+        gm_color = "green" if gm_pct >= 40 else "yellow" if gm_pct >= 30 else "white"
+        table.add_row(
+            month_name,
+            fmt_eur(row["gmv"], "M"),
+            fmt_eur(row["revenue"], "K"),
+            fmt_eur(row["gross_profit"], "K"),
+            f"[{gm_color}]{gm_pct:.1f}%[/{gm_color}]",
+        )
+
+    # Totals row
+    total_gmv = sum(r["gmv"] for r in rows)
+    total_rev = sum(r["revenue"] for r in rows)
+    total_gp = sum(r["gross_profit"] for r in rows)
+    total_gm = total_gp / total_rev if total_rev > 0 else 0.0
+    table.add_section()
+    table.add_row(
+        "[bold]TOTAL[/bold]",
+        f"[bold]{fmt_eur(total_gmv, 'M')}[/bold]",
+        f"[bold]{fmt_eur(total_rev, 'M')}[/bold]",
+        f"[bold green]{fmt_eur(total_gp, 'M')}[/bold green]",
+        f"[bold]{total_gm * 100:.1f}%[/bold]",
+    )
+
+    return table
+
+
+def build_recommendation_panel() -> Panel:
+    """Strategic recommendation: why S3 → S4 path beats S1 and S2."""
+    breakeven = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+    breakeven_churn_pct = breakeven["breakeven_churn_pct"]
+    merchants_equiv = breakeven["merchants_equiv"]
+
+    content = (
+        f"[bold]Recommended:[/bold] {RECOMMENDED_SCENARIO.name} (S3 Tiered) → S4 path\n\n"
+        f"[bold]What's sacrificed:[/bold] blended rate ~18bp (S1 retained) → ~13bp (S3/S4)\n\n"
+        f"[bold]Why it's worth it:[/bold] enterprise retention recovers €648K revenue vs S1; "
+        f"S4 adds ~€310K at 8% growth\n\n"
+        f"[bold]Breakeven cushion:[/bold] S3 GP can absorb {breakeven_churn_pct:.1f}% enterprise churn "
+        f"(~{merchants_equiv} merchants) before falling below S2\n\n"
+        f"[bold]Caveat:[/bold] S4 has includes_growth_assumption=True — commercial execution target, "
+        f"not a pricing input"
+    )
+    return Panel(content, title="Strategic Recommendation", border_style="green")
+
+
+def build_churn_sensitivity_table(
+    enterprise_gmv: float = PORTFOLIO_ENTERPRISE_GMV,
+    mid_gmv: float = PORTFOLIO_MID_GMV,
+    smb_gmv: float = PORTFOLIO_SMB_GMV,
+) -> Table:
+    """Churn sensitivity: how S1 Hold performs at varying enterprise retention levels vs S3."""
+    table = Table(
+        title="[bold cyan]Churn Sensitivity — S1 Hold Enterprise Retention vs S3 Tiered[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=80,
+    )
+    table.add_column("Retention Rate", style="dim white", min_width=16)
+    table.add_column("S1 Revenue", justify="right", min_width=14)
+    table.add_column("S1 GP", justify="right", min_width=14)
+    table.add_column("vs S3 Revenue", justify="right", min_width=16)
+    table.add_column("Break-even?", justify="center", min_width=12)
+
+    s3_result = run_scenario(S3_TIERED, enterprise_gmv, mid_gmv, smb_gmv)
+
+    for r in range(2, 11):
+        retention = r / 10.0
+        s1_variant = _replace(S1_HOLD, enterprise_retention=retention)
+        s1_result = run_scenario(s1_variant, enterprise_gmv, mid_gmv, smb_gmv)
+        delta = s1_result.total_revenue - s3_result.total_revenue
+        delta_color = "green" if delta >= 0 else "red"
+        breakeven_str = "[green]Yes[/green]" if delta >= 0 else "[red]No[/red]"
+        delta_str = f"[{delta_color}]{fmt_eur(delta, 'M')}[/{delta_color}]"
+        table.add_row(
+            fmt_pct(retention),
+            fmt_eur(s1_result.total_revenue, "M"),
+            fmt_eur(s1_result.total_gross_profit, "M"),
+            delta_str,
+            breakeven_str,
+        )
+
+    table.add_section()
+    table.add_row(
+        "S3 Tiered (ref)",
+        fmt_eur(s3_result.total_revenue, "M"),
+        fmt_eur(s3_result.total_gross_profit, "M"),
+        "—",
+        "[bold green]Baseline[/bold green]",
+    )
+
+    return table
+
+
+def build_segment_value_table() -> Table:
+    """Per-segment ROI analysis using approval rate advantage at each tier's pricing."""
+    table = Table(
+        title="[bold cyan]Segment Value Analysis — Approval Rate ROI by Tier[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=90,
+    )
+    table.add_column("Segment", style="dim white", min_width=20)
+    table.add_column("Monthly GMV", justify="right", min_width=14)
+    table.add_column("Incremental Rev/mo", justify="right", min_width=20)
+    table.add_column("Pricing Premium/mo", justify="right", min_width=20)
+    table.add_column("ROI Multiple", justify="right", min_width=14)
+    table.add_column("Net Value/mo", justify="right", min_width=14)
+
+    for seg in DEFAULT_SEGMENTS:
+        analysis = ApprovalRateAnalysis(
+            monthly_gmv=seg.monthly_gmv_eur,
+            yuno_bp=seg.take_rate_bp,
+        )
+        inc_rev = analysis.calc_incremental_merchant_revenue()
+        premium = analysis.calc_pricing_premium_cost()
+        roi = analysis.calc_roi_multiple()
+        net = analysis.calc_net_value()
+        roi_color = "green" if roi > 5 else "yellow"
+        table.add_row(
+            seg.name,
+            fmt_eur(seg.monthly_gmv_eur, "M"),
+            f"[green]+{fmt_eur(inc_rev, 'K')}/mo[/green]",
+            f"[yellow]+{fmt_eur(premium, 'K')}/mo[/yellow]",
+            f"[bold {roi_color}]{roi:.1f}x[/bold {roi_color}]",
+            f"[green]{fmt_eur(net, 'K')}/mo[/green]",
+        )
+
+    return table
+
+
+def build_competitive_dynamics_panel() -> Panel:
+    """Competitive positioning: why S2 flat 10bp is a trap and S3 wins on GP."""
+    breakeven = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+    breakeven_churn_pct = breakeven["breakeven_churn_pct"]
+    merchants_equiv = breakeven["merchants_equiv"]
+
+    total_gmv = PORTFOLIO_ENTERPRISE_GMV + PORTFOLIO_MID_GMV + PORTFOLIO_SMB_GMV
+    s2_revenue = total_gmv * 10 / 10_000
+    s3_result = run_scenario(S3_TIERED)
+    s3_revenue = s3_result.total_revenue
+    shortfall = s3_revenue - s2_revenue
+
+    content = (
+        f"[bold]Why S2 flat 10bp is a trap:[/bold] revenue €{s2_revenue/1_000_000:.3f}M vs "
+        f"S3 €{s3_revenue/1_000_000:.3f}M = €{shortfall/1_000:.0f}K shortfall; "
+        f"margin floor 10-6.5=3.5bp, insufficient for infra at scale\n\n"
+        f"[bold]Yuno's GP-based ROI:[/bold] ~16x GP per €1 premium "
+        f"(3.7pp approval delta → €518K GP/mo on €32K premium at SMB tier)\n\n"
+        f"[bold]S3 GP cushion vs S2:[/bold] S3 can absorb {breakeven_churn_pct:.1f}% enterprise churn "
+        f"(~{merchants_equiv} merchants) before GP falls below S2"
+    )
+    return Panel(content, title="Competitive Dynamics", border_style="yellow")
+
+
+def build_implementation_table() -> Table:
+    """Static implementation roadmap for S3 → S4 pricing migration."""
+    table = Table(
+        title="[bold cyan]Implementation Roadmap[/bold cyan]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold white",
+        border_style="cyan",
+        min_width=90,
+    )
+    table.add_column("Phase", style="dim white", min_width=8)
+    table.add_column("Timeline", min_width=14)
+    table.add_column("Action", min_width=40)
+    table.add_column("Success Metric", min_width=28)
+
+    table.add_row("1", "Month 1–2", "Launch S3 tiered pricing for all new merchant onboarding", "100% new contracts at 12/15/18bp")
+    table.add_row("2", "Month 3–6", "Migrate enterprise merchants to 12bp at contract renewal", "Enterprise retention ≥ 90%")
+    table.add_row("3", "Month 6–9", "Activate S4 growth incentives (volume rebates at 8% GMV uplift)", "GMV +8% YoY; blended rate ≥ 13bp")
+    table.add_row("4", "Quarterly", "Rerun approval rate analysis per segment; review pricing floor", "ROI multiple ≥ 10x")
+
+    return table
+
+
 # ---------------------------------------------------------------------------
 # Dashboard layout
 # ---------------------------------------------------------------------------
@@ -275,6 +637,9 @@ def build_dashboard(
     competitor_rate: float = 88.6,
     yuno_bp: float = 18.0,
     competitor_bp: float = 10.0,
+    merchant_margin: float = 0.35,
+    chargeback_rate: float = 0.5,
+    failed_rate: float = 3.0,
 ) -> Layout:
     """Assemble the full Rich Layout for the dashboard."""
     layout = Layout()
@@ -295,7 +660,7 @@ def build_dashboard(
         Panel(Text.from_markup(HEADER_TEXT), border_style="bold blue")
     )
     layout["value"].update(
-        build_value_table(monthly_gmv, yuno_rate, competitor_rate, yuno_bp, competitor_bp)
+        build_value_table(monthly_gmv, yuno_rate, competitor_rate, yuno_bp, competitor_bp, merchant_margin)
     )
     layout["scenarios"].update(build_scenario_table())
     layout["bottom"].update(build_sensitivity_table())
@@ -314,6 +679,9 @@ def run_interactive(
     competitor_rate: float = 88.6,
     yuno_bp: float = 18.0,
     competitor_bp: float = 10.0,
+    merchant_margin: float = 0.35,
+    chargeback_rate: float = 0.5,
+    failed_rate: float = 3.0,
 ) -> None:
     """Run the interactive TUI loop.
 
@@ -322,16 +690,40 @@ def run_interactive(
     """
     while True:
         console.clear()
-        console.print(build_value_table(monthly_gmv, yuno_rate, competitor_rate, yuno_bp, competitor_bp))
+        console.print(build_value_table(monthly_gmv, yuno_rate, competitor_rate, yuno_bp, competitor_bp, merchant_margin))
         console.print()
         console.print(build_scenario_table())
         console.print()
         console.print(build_sensitivity_table())
         console.print()
+        console.print(build_breakeven_table())
+        console.print()
+        console.print(
+            Columns([
+                build_chargeback_table(monthly_gmv, chargeback_rate),
+                build_recovery_table(monthly_gmv, failed_rate),
+            ])
+        )
+        console.print()
+        console.print(build_monthly_pl_table(RECOMMENDED_SCENARIO))
+        console.print()
+        console.print(build_recommendation_panel())
+        console.print()
+        console.print(build_churn_sensitivity_table())
+        console.print()
+        console.print(build_segment_value_table())
+        console.print()
+        console.print(build_competitive_dynamics_panel())
+        console.print()
+        console.print(build_implementation_table())
+        console.print()
         console.print(
             f"[dim]Current inputs:[/dim] GMV=[cyan]€{monthly_gmv/1_000_000:.0f}M/mo[/cyan]  "
             f"Yuno=[cyan]{yuno_rate}%[/cyan]  Competitor=[cyan]{competitor_rate}%[/cyan]  "
-            f"Yuno rate=[cyan]{yuno_bp}bp[/cyan]  Competitor rate=[cyan]{competitor_bp}bp[/cyan]"
+            f"Yuno rate=[cyan]{yuno_bp}bp[/cyan]  Competitor rate=[cyan]{competitor_bp}bp[/cyan]  "
+            f"Margin=[cyan]{merchant_margin*100:.0f}%[/cyan]  "
+            f"CB rate=[cyan]{chargeback_rate}%[/cyan]  "
+            f"Failed rate=[cyan]{failed_rate}%[/cyan]"
         )
         console.print()
         console.print("[bold]Update inputs[/bold] (press Enter to keep current value, type [bold red]q[/bold red] to quit):")
@@ -386,6 +778,36 @@ def run_interactive(
                 break
             if comp_bp_input.strip():
                 competitor_bp = float(comp_bp_input.strip())
+
+            margin_input = Prompt.ask(
+                f"  Merchant gross margin % (currently {merchant_margin*100:.0f})",
+                default="",
+                console=console,
+            )
+            if margin_input.strip().lower() == "q":
+                break
+            if margin_input.strip():
+                merchant_margin = float(margin_input.strip()) / 100.0
+
+            cb_input = Prompt.ask(
+                f"  Chargeback rate % (currently {chargeback_rate})",
+                default="",
+                console=console,
+            )
+            if cb_input.strip().lower() == "q":
+                break
+            if cb_input.strip():
+                chargeback_rate = float(cb_input.strip())
+
+            failed_input = Prompt.ask(
+                f"  Failed payment rate % (currently {failed_rate})",
+                default="",
+                console=console,
+            )
+            if failed_input.strip().lower() == "q":
+                break
+            if failed_input.strip():
+                failed_rate = float(failed_input.strip())
 
         except (KeyboardInterrupt, EOFError):
             break

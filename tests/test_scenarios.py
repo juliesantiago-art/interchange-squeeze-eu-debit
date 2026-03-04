@@ -6,6 +6,8 @@ from interchange_squeeze.scenarios import (
     ScenarioResult,
     run_scenario,
     compare_scenarios,
+    calc_breakeven_attrition,
+    calc_monthly_pl,
     S1_HOLD,
     S2_FLAT_10BP,
     S3_TIERED,
@@ -14,6 +16,8 @@ from interchange_squeeze.scenarios import (
     PORTFOLIO_ENTERPRISE_GMV,
     PORTFOLIO_MID_GMV,
     PORTFOLIO_SMB_GMV,
+    MONTHLY_SEASONALITY,
+    RECOMMENDED_SCENARIO,
 )
 
 
@@ -165,3 +169,104 @@ class TestScenarioResult:
         # Blended rate = total_revenue / total_gmv * 10000
         expected = result.total_revenue / result.total_gmv * 10_000
         assert result.blended_take_rate_bp == pytest.approx(expected, rel=1e-9)
+
+
+class TestScenarioFlags:
+    def test_s3_recommended(self):
+        assert S3_TIERED.recommended is True
+
+    def test_s4_includes_growth_assumption(self):
+        assert S4_TIERED_GROWTH.includes_growth_assumption is True
+
+    def test_s1_not_recommended(self):
+        assert S1_HOLD.recommended is False
+
+    def test_s2_no_growth_assumption(self):
+        assert S2_FLAT_10BP.includes_growth_assumption is False
+
+    def test_recommended_scenario_is_s3(self):
+        assert RECOMMENDED_SCENARIO is S3_TIERED
+
+
+class TestBreakevenAttrition:
+    def test_returns_expected_keys(self):
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        assert set(result.keys()) == {
+            "breakeven_churn_pct", "breakeven_gmv_eur", "merchants_equiv",
+            "test_gp", "vs_gp", "gp_cushion",
+        }
+
+    def test_s3_vs_s2_churn_approx_75pct(self):
+        # S3 has ~75% churn tolerance before GP falls to S2 level
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        assert result["breakeven_churn_pct"] == pytest.approx(75.0, abs=2.0)
+
+    def test_gp_cushion_positive(self):
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        assert result["gp_cushion"] > 0
+
+    def test_test_gp_greater_pagina_vs_gp(self):
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        assert result["test_gp"] > result["vs_gp"]
+
+    def test_merchants_equiv_is_int(self):
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        assert isinstance(result["merchants_equiv"], int)
+
+    def test_merchants_equiv_positive(self):
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        assert result["merchants_equiv"] > 0
+
+    def test_breakeven_gmv_consistent_with_churn_pct(self):
+        result = calc_breakeven_attrition(S3_TIERED, S2_FLAT_10BP)
+        expected_churn = (result["breakeven_gmv_eur"] / PORTFOLIO_ENTERPRISE_GMV) * 100
+        assert result["breakeven_churn_pct"] == pytest.approx(expected_churn, rel=1e-9)
+
+
+class TestMonthlyPL:
+    def test_returns_12_rows(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        assert len(rows) == 12
+
+    def test_each_row_has_required_keys(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        for row in rows:
+            assert set(row.keys()) == {"month", "gmv", "revenue", "gross_profit", "gross_margin_pct"}
+
+    def test_month_numbers_1_to_12(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        assert [r["month"] for r in rows] == list(range(1, 13))
+
+    def test_annual_gmv_sums_match_scenario(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        annual = run_scenario(S3_TIERED)
+        total_gmv = sum(r["gmv"] for r in rows)
+        assert total_gmv == pytest.approx(annual.total_gmv, rel=1e-9)
+
+    def test_annual_revenue_sums_match_scenario(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        annual = run_scenario(S3_TIERED)
+        total_rev = sum(r["revenue"] for r in rows)
+        assert total_rev == pytest.approx(annual.total_revenue, rel=1e-9)
+
+    def test_annual_gp_sums_match_scenario(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        annual = run_scenario(S3_TIERED)
+        total_gp = sum(r["gross_profit"] for r in rows)
+        assert total_gp == pytest.approx(annual.total_gross_profit, rel=1e-9)
+
+    def test_seasonality_sums_to_one(self):
+        assert sum(MONTHLY_SEASONALITY) == pytest.approx(1.0, rel=1e-9)
+
+    def test_q4_higher_than_q1(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        q1_gmv = sum(rows[i]["gmv"] for i in range(3))   # Jan–Mar
+        q4_gmv = sum(rows[i]["gmv"] for i in range(9, 12))  # Oct–Dec
+        assert q4_gmv > q1_gmv
+
+    def test_gross_margin_pct_consistent(self):
+        rows = calc_monthly_pl(S3_TIERED)
+        for row in rows:
+            if row["revenue"] > 0:
+                expected_gm = row["gross_profit"] / row["revenue"]
+                assert row["gross_margin_pct"] == pytest.approx(expected_gm, rel=1e-9)
