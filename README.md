@@ -9,8 +9,8 @@ European debit interchange is being squeezed. This tool models four pricing stra
 **Key scenarios modeled:**
 - **S1 Hold 18bp** — Defend current rates, risk GMV loss
 - **S2 Flat 10bp** — Match market floor, maximize retention
-- **S3 Tiered 12-18bp** — Segment by merchant size
-- **S4 Tiered + Growth** — Tiered pricing with volume incentives
+- **S3 Tiered 12-18bp** — Segment by merchant size ★ Recommended
+- **S4 Tiered + Growth** — Tiered pricing with 8% GMV growth ⚠ Growth is a commercial execution target, not a pricing input
 
 ## Quick Start
 
@@ -52,19 +52,28 @@ uv run python -m interchange_squeeze --non-interactive
 ### Interactive Controls
 
 Once the dashboard is running:
-- Type new values at the prompts to update GMV, rates, or approval deltas
+- Type new values at the prompts to update GMV, rates, approval deltas, merchant margin, chargeback rate, or failed payment rate
 - Press `Ctrl+C` or type `q` to quit
 
 ## Dashboard Panels
 
-1. **Merchant Value Analysis** — Approval rate delta → incremental revenue, ROI multiple
-2. **Scenario Comparison** — S1–S4 revenue, gross profit, margin side by side
-3. **Sensitivity Analysis** — GMV growth required at each rate to match baseline
+1. **Merchant Value Analysis** — Approval rate delta → incremental GP and ROI multiple (GP-basis: ~16x GP per €1 premium)
+2. **Scenario Comparison** — S1–S4 revenue, gross profit, margin side by side; S3 marked ★ recommended, S4 marked ⚠ growth assumption
+3. **Sensitivity Analysis** — GMV growth required at each rate to match S3 baseline revenue
+4. **Break-Even Analysis** — Max Enterprise churn S3 can absorb before GP falls below S2 (~75%)
+5. **Chargeback Reduction** — Fee + dispute cost savings from smart routing
+6. **Failed Payment Recovery** — Revenue recovered via retry logic
+7. **12-Month P&L** — Recommended scenario with EU debit seasonality (Q1 light, Q4 heavy)
+8. **Strategic Recommendation** — S3 → S4 path rationale with breakeven cushion
+9. **Churn Sensitivity** — S1 Hold revenue at varying enterprise retention levels vs S3
+10. **Segment Value Analysis** — Approval rate ROI by merchant tier
+11. **Competitive Dynamics** — Why S2 flat 10bp is a margin trap
+12. **Implementation Roadmap** — S3 → S4 migration phases and success metrics
 
 ## Run Tests
 
 ```bash
-uv run pytest
+uv run pytest          # 121 tests
 ```
 
 ## Project Structure
@@ -73,7 +82,9 @@ uv run pytest
 src/interchange_squeeze/
 ├── models.py      # Core financial dataclasses + calc functions
 ├── value.py       # Approval rate → merchant revenue converter
+│                  #   ApprovalRateAnalysis, ChargebackAnalysis, FailedPaymentRecovery
 ├── scenarios.py   # 4 scenario definitions + comparison engine
-├── tui.py         # Rich TUI layout and tables
+│                  #   calc_breakeven_attrition(), calc_monthly_pl(), MONTHLY_SEASONALITY
+├── tui.py         # Rich TUI layout and tables (12 panel builders)
 └── cli.py         # Typer CLI entry point
 ```
