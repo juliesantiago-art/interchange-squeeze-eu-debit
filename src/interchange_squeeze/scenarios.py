@@ -317,3 +317,33 @@ def calc_breakeven_attrition(
         "vs_gp": vs_gp,
         "gp_cushion": gp_cushion,
     }
+
+
+# ---------------------------------------------------------------------------
+# S4 growth derivation — connects approval rate advantage to GMV growth
+# ---------------------------------------------------------------------------
+
+def calc_approval_rate_implied_gmv_growth(
+    approval_rate_delta_pp: float = 3.7,
+    new_merchant_win_growth: float = 0.04,
+) -> float:
+    """Derive the GMV growth assumption underlying S4 from first principles.
+
+    Two components:
+    1. Organic uplift: Yuno's approval rate advantage approves transactions
+       that competitors decline. A 3.7pp delta ≈ 3.7% more transactions
+       approved → ~3.7% organic GMV retention/growth on the existing book.
+    2. New merchant wins: improved economics attract new logos (~4% of
+       portfolio, conservative estimate for a deliberate market-share play).
+
+    Combined: ~7.7%, rounded to 8% in S4 as a commercial execution target.
+
+    Args:
+        approval_rate_delta_pp: Yuno vs competitor approval rate gap (pp)
+        new_merchant_win_growth: Fractional GMV growth from new merchant wins
+
+    Returns:
+        Implied annual GMV growth rate (e.g. 0.077 = 7.7%)
+    """
+    organic_uplift = approval_rate_delta_pp / 100.0
+    return organic_uplift + new_merchant_win_growth

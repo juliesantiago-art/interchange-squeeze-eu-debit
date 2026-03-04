@@ -167,7 +167,7 @@ class TestBuildImplementationTable:
 
     def test_row_count(self):
         table = build_implementation_table()
-        assert table.row_count == 4
+        assert table.row_count == 7  # Phase 0–4 + OBJ + CTG
 
     def test_has_phase_column(self):
         table = build_implementation_table()

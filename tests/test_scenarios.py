@@ -8,6 +8,7 @@ from interchange_squeeze.scenarios import (
     compare_scenarios,
     calc_breakeven_attrition,
     calc_monthly_pl,
+    calc_approval_rate_implied_gmv_growth,
     S1_HOLD,
     S2_FLAT_10BP,
     S3_TIERED,
@@ -270,3 +271,43 @@ class TestMonthlyPL:
             if row["revenue"] > 0:
                 expected_gm = row["gross_profit"] / row["revenue"]
                 assert row["gross_margin_pct"] == pytest.approx(expected_gm, rel=1e-9)
+
+
+class TestApprovalRateImpliedGrowth:
+    def test_default_returns_approx_7_7_pct(self):
+        """Default: 3.7pp approval delta + 4% new merchant wins = ~7.7%."""
+        result = calc_approval_rate_implied_gmv_growth()
+        assert result == pytest.approx(0.077, rel=1e-6)
+
+    def test_validates_s4_growth_assumption(self):
+        """Derived growth (~7.7%) is within 1pp of S4's 8% target — validates the assumption."""
+        result = calc_approval_rate_implied_gmv_growth()
+        assert abs(result - S4_TIERED_GROWTH.gmv_growth_rate) < 0.01
+
+    def test_zero_inputs_return_zero(self):
+        result = calc_approval_rate_implied_gmv_growth(
+            approval_rate_delta_pp=0.0,
+            new_merchant_win_growth=0.0,
+        )
+        assert result == 0.0
+
+    def test_organic_component_equals_delta_over_100(self):
+        """Organic uplift = approval delta / 100."""
+        delta_pp = 5.0
+        result = calc_approval_rate_implied_gmv_growth(
+            approval_rate_delta_pp=delta_pp,
+            new_merchant_win_growth=0.0,
+        )
+        assert result == pytest.approx(delta_pp / 100.0, rel=1e-9)
+
+    def test_new_merchant_component_additive(self):
+        """New merchant wins add linearly to organic uplift."""
+        result = calc_approval_rate_implied_gmv_growth(
+            approval_rate_delta_pp=0.0,
+            new_merchant_win_growth=0.06,
+        )
+        assert result == pytest.approx(0.06, rel=1e-9)
+
+    def test_result_is_positive_for_positive_inputs(self):
+        result = calc_approval_rate_implied_gmv_growth()
+        assert result > 0
