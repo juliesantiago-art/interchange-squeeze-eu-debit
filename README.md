@@ -36,7 +36,17 @@ Options:
   --merchant-gmv FLOAT     Monthly GMV in millions EUR (default: 40)
   --yuno-rate FLOAT        Yuno approval rate % (default: 92.3)
   --competitor-rate FLOAT  Competitor approval rate % (default: 88.6)
+  --yuno-bp FLOAT          Yuno take rate in basis points (default: 18)
+  --competitor-bp FLOAT    Competitor take rate in basis points (default: 10)
+  --non-interactive / -n   Print tables once and exit (no prompts)
   --help                   Show this message and exit.
+```
+
+### Non-interactive (scripting / CI)
+
+```bash
+uv run interchange-squeeze --non-interactive
+uv run python -m interchange_squeeze --non-interactive
 ```
 
 ### Interactive Controls
