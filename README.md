@@ -12,6 +12,41 @@ European debit interchange is being squeezed. This tool models four pricing stra
 - **S3 Tiered 12-18bp** — Segment by merchant size ★ Recommended
 - **S4 Tiered + Growth** — Tiered pricing with 8% GMV growth ⚠ Growth is a commercial execution target, not a pricing input
 
+## Strategic Recommendation
+
+**Recommended: S3 Tiered (12/15/18bp) → S4 path**
+
+Yuno is optimizing for **EU debit market share and enterprise logo retention over short-term margin** — a deliberate market-share play, not a margin defense.
+
+**What's sacrificed:** blended rate drops ~18bp (S1) → ~13bp (S3). Each bp surrendered = ~€297K annual revenue at portfolio scale. Total rate give-up vs S1: ~5bp ≈ €1.49M/year — offset by €648K enterprise revenue recovered (full enterprise GMV at 12bp vs 50% retained at 18bp) and enterprise LTV preserved.
+
+**Why not S1:** a representative enterprise merchant (€480M GMV) pays €384K/year in premium vs a regional specialist at 10bp — enough to justify switching costs. At 50% modeled churn, S1 permanently loses €1.08B in enterprise GMV.
+
+**Why not S2:** flat 10bp delivers 3.5bp net margin (10 − 6.5bp cost). At €2.97B annual portfolio GMV, that's ~€1.04M gross profit vs S3's ~€1.77M. S2 is a structural margin trap that cannot sustain multi-region infrastructure.
+
+**Breakeven cushion:** S3 can absorb ~75% enterprise churn before GP falls below S2 — well above S1's modeled 50% churn scenario.
+
+**S4 path:** viable only with commercial execution. 8% GMV growth = ~3.7% organic uplift from approval rate advantage + ~4% new merchant wins (derived via `calc_approval_rate_implied_gmv_growth()`). S4 is a commercial target, not a pricing input.
+
+---
+
+## Model Assumptions
+
+All assumptions are explicit and sensitivity-tested where material:
+
+| Assumption | Value | Basis | Sensitivity |
+|---|---|---|---|
+| Cost to serve | 6.5bp blended | Industry average for payment orchestration | Enterprise likely ~5bp (higher volume, lower support overhead); if true, S3 cushion only widens |
+| Enterprise churn in S1 | 50% | Conservative midpoint for price-sensitive tier | Churn sensitivity panel covers 20–100% retention |
+| Approval rate delta | 3.7pp (Yuno vs competitor) | Yuno EU debit data | Applied uniformly across tiers; actual delta may vary by card mix and volume tier |
+| Average order value | €85 | Typical EU ecom transaction | Adjustable via `--merchant-gmv` CLI flag |
+| Merchant gross margin | 35% | Typical ecom gross margin | Adjustable interactively; travel ~10%, SaaS ~70% |
+| EU debit seasonality | Q1 light (7.0%), Q4 heavy (9.5–10%) | EU retail spending pattern | Weights sum to 1.0, validated in tests |
+| S4 GMV growth target | 8% | ~3.7% organic (approval rate advantage) + ~4% new merchant wins | First-principles derivation in `calc_approval_rate_implied_gmv_growth()` |
+| Competitor rate floor | 10bp | Regional specialist pricing (Mollie, Stripe EU, local acquirers) | Sensitivity table covers 8–18bp flat rate scenarios |
+
+---
+
 ## Quick Start
 
 ```bash
